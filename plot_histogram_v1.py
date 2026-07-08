@@ -6,17 +6,14 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.ndimage import label, find_objects
 
 # ── Configure ───────────────────────────────────────────────────────────
-CLEAN_PATH          = "clean_vol_Diced_Beef_no_STD.tiff"
-SEEDED_PATH         = "clean_vol_Diced_Beef_w_STD.tiff"
+CLEAN_PATH          = "clean_vol_Beef_Patties_no_STD.tiff"
+SEEDED_PATH         = "clean_vol_Beef_Patties_w_STD.tiff"
 BINS                = 1024
 NOISE_SIGNAL_MAX    = 300
 BASELINE_SIGMA      = 3.0   # std devs above left tail mean to set baseline
 SAFETY_MARGIN       = 0.05  # pull threshold down by this fraction as safety buffer
 SMOOTH_SIGNAL_WIDTH = 25    # smoothing width in signal intensity units
 SPARSE_COUNT        = 50    # voxels per bin below which product is considered ended
-MIN_COUNTS          = 1
-IQR_MULTIPLIER      = 0.75   # how many IQRs above local median to flag as outlier
-IQR_WINDOW_BINS     = 8  
 
 raw_data_plot  = False
 diff_data_plot = True
@@ -69,6 +66,9 @@ tail_centers  = centers[tail_mask]
 tail_seeded   = seeded_counts[tail_mask].astype(float)
 tail_clean    = counts[tail_mask].astype(float)
 
+# log1p smoothing (adding 1) avoids log(0) without hardcoding a min count
+# In the product/bone region both scans are similar → ratio ≈ 0 (flat)
+# Where contaminant appears in seeded but not clean → ratio rises above 0
 log_ratio = np.log10(tail_seeded + 1) - np.log10(tail_clean + 1)
 
 # Use all bins — log1p smoothing means no bins need to be excluded
@@ -76,18 +76,22 @@ valid_centers = tail_centers
 valid_counts  = log_ratio   # piecewise fit now operates on the ratio
 
 n           = len(valid_centers)
-min_segment = 4
+min_segment = 10
 residuals   = np.full(n, np.inf)
 
-## At each point a straight line is fit to points left and right of the point. The position where the two lines together fit best is the natural breakpoint in the data
+## At each point a straight line is fit to points left and right of the point. 
+# The position where the two lines together fit best is the natural breakpoint in the data
 for i in range(min_segment, n - min_segment):
+
     x_left   = valid_centers[:i]
     y_left   = valid_counts[:i]
+    
     c_left   = np.polyfit(x_left, y_left, 1)
     res_left = np.sum((y_left - np.polyval(c_left, x_left)) ** 2)
 
     x_right   = valid_centers[i:]
     y_right   = valid_counts[i:]
+
     c_right   = np.polyfit(x_right, y_right, 1)
     res_right = np.sum((y_right - np.polyval(c_right, x_right)) ** 2)
 
@@ -102,52 +106,6 @@ print(f"  breakpoint signal:    {breakpoint_signal:.0f}")
 print(f"  suggested threshold:  {threshold:.0f} ")
 
 slag_mask = seeded_data >= threshold
-
-
-# ── 3. Rolling IQR outlier detection ──────────────────────────────────────
-full_tail_counts = tail_seeded.copy().astype(float)
-log_full = np.where(full_tail_counts > 0,
-                    np.log10(full_tail_counts),
-                    -1.0)   # assign -1 to zero bins (below any real signal)
-
-n_full       = len(tail_centers)
-is_outlier   = np.zeros(n_full, dtype=bool)
-local_median = np.zeros(n_full)
-upper_fence  = np.zeros(n_full)
-
-for i in range(n_full):
-    lo = max(0, i - IQR_WINDOW_BINS)
-    hi = min(n_full, i + IQR_WINDOW_BINS + 1)
-    window_vals = log_full[lo:hi]
-
-    # Only include non-zero bins in the IQR calculation
-    real_vals = window_vals[window_vals > -1]
-
-    if len(real_vals) < 3:
-        # Not enough real signal in window — skip
-        continue
-
-    q25 = np.percentile(real_vals, 25)
-    q75 = np.percentile(real_vals, 75)
-    iqr = q75 - q25
-    med = np.median(real_vals)
-
-    local_median[i] = med
-    upper_fence[i]  = med + IQR_MULTIPLIER * iqr
-
-    if log_full[i] > upper_fence[i] and full_tail_counts[i] > 0:
-        is_outlier[i] = True
-
-outlier_signals = tail_centers[is_outlier]
-
-print(f"\n── Rolling IQR outlier detection ──────────────────")
-print(f"  outliers found: {is_outlier.sum()}")\
-
-if len(outlier_signals) > 0:
-    iqr_signal    = float(outlier_signals[0])
-    threshold_e   = (iqr_signal // 100) * 100
-    print(f"  first outlier signal: {iqr_signal:.0f}")
-    print(f"  suggested threshold:  {threshold_e:.0f}")
 
 # ─────────── PLOTTING USED FOR TESTING ONLY ───────────────────────────────
 fig, ax = plt.subplots(figsize=(12, 5))
@@ -164,6 +122,11 @@ ax.set_title("TEST — Histogram with negative values masked out", pad=10)
 ax.set_xlabel("Signal intensity")
 ax.set_ylabel("Voxel count")
 ax.legend(fontsize=9)
+
+# Add tick marks at every bin center location
+ax.set_xticks(centers)
+ax.tick_params(axis='x', which='major', length=4, width=0.5, labelsize=0)
+
 plt.tight_layout()
 plt.show()
 
